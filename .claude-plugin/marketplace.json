@@ -1,0 +1,11 @@
+{
+  "name": "roadmap-kanban",
+  "owner": { "name": "mbadaz" },
+  "plugins": [
+    {
+      "name": "roadmap-kanban",
+      "source": "./",
+      "description": "A kanban board pane over a markdown task file: stages as tabs, checkbox tasks as cards, moves written back to the file"
+    }
+  ]
+}

@@ -1,0 +1,14 @@
+{
+  "name": "roadmap-kanban",
+  "version": "0.2.2",
+  "description": "A kanban board pane over a markdown task file (TASKS.md by default): stages as tabs, checkbox tasks as cards, moves written back to the file",
+  "types": "./types/index.d.ts",
+  "userConfig": {
+    "file": {
+      "type": "string",
+      "title": "Task file",
+      "description": "The markdown file the board reads and writes: relative to the session's working directory, or absolute",
+      "default": "TASKS.md"
+    }
+  }
+}
