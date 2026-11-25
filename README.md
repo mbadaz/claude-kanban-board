@@ -10,7 +10,7 @@ to it anywhere else show on the board within a second or two.
 At the prompt of a Claude Code terminal session:
 
 ```
-/plugin install roadmap-kanban --marketplace mbadaz/roadmap-kanban
+/plugin install roadmap-kanban --marketplace mbadaz/claude-kanban-board
 ```
 
 Answer `y` to add the marketplace, then pick a scope (user, the first one,
@@ -19,11 +19,11 @@ installs it for every session).
 From a shell:
 
 ```
-claude plugin install roadmap-kanban --marketplace mbadaz/roadmap-kanban
+claude plugin install roadmap-kanban --marketplace mbadaz/claude-kanban-board
 ```
 
 In the desktop app, where `/plugin` does not run: click + next to the prompt
-box, then Plugins, Add marketplace with `mbadaz/roadmap-kanban`, then Add plugin.
+box, then Plugins, Add marketplace with `mbadaz/claude-kanban-board`, then Add plugin.
 
 ## Use
 
@@ -36,6 +36,29 @@ box, then Plugins, Add marketplace with `mbadaz/roadmap-kanban`, then Add plugin
 - Type in the `+` box to add a card below the selected one, or at the end of
   the stage when none is selected.
 - `r` reloads the file.
+
+## Tools for Claude
+
+In a folder that has the task file, the mod also gives Claude six tools, so you
+can ask for changes in plain words ("move the changelog card to doing", "add a
+stage for the launch with these three tasks"):
+
+| Tool | What it does |
+|---|---|
+| `list_tasks` | Lists the stages and cards, with each card's id, status, group and line |
+| `add_task` | Adds a card to a stage, below a given card or at the end |
+| `set_task_status` | Moves a card to to do, doing or done |
+| `remove_task` | Deletes a card, with its continuation lines |
+| `add_stage` | Adds a `## ` section with its first cards, at the end or after a stage |
+| `remove_stage` | Deletes a stage; refuses while it has unfinished cards unless forced |
+
+They use the board's own parser and editor, so they make the same minimal edits
+and use the same card ids, and an edit to a card that changed since Claude
+listed it is refused. Their edits show on the board at once. Claude Code asks
+your permission the first time each one is used, as for any tool; the permission
+rule `mcp__roadmap-kanban__*` allows them all.
+
+## The task file
 
 To point the board at another file (`ROADMAP.md`, say, or an absolute path),
 set **Task file** in `/config`, or pass `--config file=ROADMAP.md` when

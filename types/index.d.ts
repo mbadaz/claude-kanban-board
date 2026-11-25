@@ -40,4 +40,19 @@ declare module 'claude-code' {
       added: number
     }
   }
+
+  /** The tools this mod registers (hooks/tools.ts), as the model calls them. */
+  interface McpToolInputs {
+    'mcp__roadmap-kanban__list_tasks': { stage?: string }
+    'mcp__roadmap-kanban__add_task': {
+      stage: string
+      text: string
+      after?: string
+      status?: Status
+    }
+    'mcp__roadmap-kanban__set_task_status': { id: string; status: Status }
+    'mcp__roadmap-kanban__remove_task': { id: string }
+    'mcp__roadmap-kanban__add_stage': { title: string; tasks: string[]; after?: string }
+    'mcp__roadmap-kanban__remove_stage': { title: string; force?: boolean }
+  }
 }

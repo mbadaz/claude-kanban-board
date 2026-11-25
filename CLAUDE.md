@@ -12,9 +12,10 @@ file covers working on the mod.
 | `.claude-plugin/plugin.json` | Name, version, the `file` option (`userConfig`, default `TASKS.md`), the types contract |
 | `.claude-plugin/marketplace.json` | Makes this repository its own marketplace (`source: "./"`), so it installs with one line |
 | `hooks/hooks.json` | Names the one hooks module, `register.tsx` |
-| `hooks/register.tsx` | Everything that touches `$`: `/kanban`, the 1.5 s poll, the pane, moves and adds |
+| `hooks/register.tsx` | Everything that touches `$`: `/kanban`, the 1.5 s poll, the pane, moves and adds, registering and serving the tools |
 | `hooks/roadmap.ts` | Pure parsing and editing, no `$`, so the tests can drive it directly |
-| `types/index.d.ts` | The `$.state` contract (`PluginState['roadmap-kanban']`) |
+| `hooks/tools.ts` | The model's tools: their specs, and `runTool`, pure over the file's text |
+| `types/index.d.ts` | The `$.state` contract (`PluginState['roadmap-kanban']`) and the tools' inputs (`McpToolInputs`) |
 | `tests/kanban.test.tsx` | Parser, editor and pane tests |
 | `tsconfig.json` | Extends `.claude-plugin/types/tsconfig.json`, which the engine writes |
 
@@ -44,6 +45,20 @@ file covers working on the mod.
   value stored by old code instead of misreading it.
 - **Moving a card never moves its line between sections.** The status lives in
   the checkbox, not in the line's position.
+- **The tools share the board's parser and editor**, and each reads the file
+  fresh, so they inherit every rule above, stale-id refusal included. Their
+  answers name ids and stage titles the way `list_tasks` prints them, because
+  the model's next call takes them back.
+- **The tools exist only where the task file does.** They're registered at
+  session start, or when `/kanban` finds a file made later, so other projects
+  never see them. There is no unregistering: a file deleted mid-session leaves
+  them answering "No TASKS.md at …".
+- **Tools are answered in `tool.run`, never `tool.call`.** `tool.run` fires only
+  after the session's permission check allowed the call; an answer at
+  `tool.call` would skip that check, letting the model write the file unasked.
+- **`remove_stage` refuses while a stage has unfinished cards** unless `force`
+  is true, and `add_stage` needs at least one card (an empty `## ` section
+  can't be told apart from prose like "Beyond v1.0", so it wouldn't be a stage).
 
 ## Checking a change
 
@@ -68,6 +83,19 @@ Test-kit behaviour worth knowing:
 - Options go in as `test(name, { options: { file: '…' } }, body)`.
 - `mock.clock(on)` holds every timer; `clock.advance(ms)` fires the poll and the
   notice timeout.
+- A test that wants the tools registered answers `tool.register`; then
+  `$.tool.call({ tool: 'mcp__roadmap-kanban__…', ...args })` runs a call through
+  the engine to the mod's `tool.run` hook.
+
+Loader and type rules the tools ran into:
+
+- Each hook passed to `on` must be written as a function at the call site
+  (`($, e) => serve($, 'list_tasks', e)`), with the tool name as a string
+  literal in the matcher. A hook returned by a helper makes the module fail to
+  load.
+- The engine's types accept only tool names they know, so the tools and their
+  inputs are declared in `types/index.d.ts` under `McpToolInputs`. Keep that in
+  step with `toolSpecs` in `tools.ts`.
 
 ## Releasing
 
@@ -92,6 +120,7 @@ Test-kit behaviour worth knowing:
 
 This folder is both the installed mod (it loads in every session as
 `roadmap-kanban@skills-dir`, user scope) and the working copy of the public
-repository `mbadaz/roadmap-kanban` (branch `main`). Changes here take effect in
+repository `mbadaz/claude-kanban-board` (branch `main`; the plugin and its
+marketplace are still named `roadmap-kanban`). Changes here take effect in
 the next session, not this one. Don't also install the mod from its marketplace
 on this machine: two copies would load, and what that does is untested.

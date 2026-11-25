@@ -1,7 +1,8 @@
 import { expect, mock, test } from 'claude-code/testing'
 import type { TestBody } from 'claude-code/testing'
 
-import { addTask, parseRoadmap, setStatus } from '../hooks/roadmap'
+import { addStage, addTask, parseRoadmap, removeStage, removeTask, setStatus } from '../hooks/roadmap'
+import { runTool } from '../hooks/tools'
 
 const SAMPLE = [
   '# Plan',
@@ -362,6 +363,12 @@ test(
 /** SAMPLE as /p/TASKS.md in memory, edited by the board or by `save` (another editor). */
 const world = async (...[$, on]: Parameters<TestBody>) => {
   const clock = mock.clock(on)
+  const tools: string[] = []
+  on('tool.register', (_, e) => {
+    tools.push(e.name)
+
+    return { value: { tool: `mcp__roadmap-kanban__${e.name}` } }
+  })
   const file = {
     text: SAMPLE,
     mtimeMs: 1,
@@ -394,7 +401,7 @@ const world = async (...[$, on]: Parameters<TestBody>) => {
   })
   await $.session.start({ cwd: '/p', surface: 'terminal', isInteractive: true })
 
-  return { clock, file }
+  return { clock, file, tools }
 }
 
 const pane = ($: Parameters<TestBody>[0], placement: 'dock' | 'widget' = 'dock', bodyColumns = 90) =>
@@ -468,5 +475,183 @@ test('the widget shows the stage in view and its counts, not the board', async (
   expect(await ui.find({ type: 'Text', text: 'Phase 1 — Groundwork' })).toBeDefined()
   expect((await ui.find({ type: 'Text', text: /to do ·/ }))?.text).toBe('1 to do · 1 doing · 1 done')
   expect(await ui.find({ key: 'add-0' })).toBeUndefined()
+  await ui.unmount()
+})
+
+// ── The model's tools ───────────────────────────────────────────────────────
+
+const ids = (text: string) => parseRoadmap(text, '', 0).stages.map(stage => stage.tasks.map(t => t.id))
+const run = (name: Parameters<typeof runTool>[0], input: Record<string, unknown>, text = SAMPLE) =>
+  runTool(name, input, text, 'TASKS.md')
+
+test('list_tasks shows every card with its id, status, group and line; a stage by the start of its title', async () => {
+  const all = run('list_tasks', {})
+  expect(all.isError).toBeUndefined()
+  expect(all.text).toBeUndefined()
+  expect(all.answer).toContain('TASKS.md: 2 stages, 4 cards.')
+  expect(all.answer).toContain('## Phase 1 — Groundwork · 1 of 3 done')
+  expect(all.answer).toContain(
+    `**Remaining**\n- [ ] ${VERIFY.id}: Check the API notes against v2. They still describe the v1 endpoints. (line 11)`,
+  )
+
+  const one = run('list_tasks', { stage: 'phase 2' })
+  expect(one.answer).toContain('## Phase 2 — First release · 0 of 1 done')
+  expect(one.answer).not.toContain('Phase 1')
+  expect(run('list_tasks', { stage: 'Phase' })).toMatchObject({ isError: true })
+  expect(run('list_tasks', { stage: 'Phase' }).answer).toMatch(/^More than one stage starts with “Phase”/)
+  expect(run('list_tasks', { stage: 'Later' }).answer).toBe(
+    'No stage titled “Later”. Stages: “Phase 1 — Groundwork”, “Phase 2 — First release”.',
+  )
+})
+
+test('add_task adds below a card, in the status asked for, and refuses what it cannot place', async () => {
+  const added = run('add_task', { stage: 'Phase 1', text: 'Draft  the changelog', after: VERIFY.id, status: 'doing' })
+  expect(added.isError).toBeUndefined()
+  expect(added.text!.split('\n').slice(10, 14)).toEqual([
+    '- [ ] **Check the API notes against v2.** They still describe',
+    '      the v1 endpoints.',
+    '- [/] Draft the changelog',
+    '- [/] Choose the app name.',
+  ])
+  const made = parseRoadmap(added.text!, '', 0).stages[0]!.tasks[2]!
+  expect(added.answer).toBe(`Added ${made.id} to “Phase 1 — Groundwork”, line 13, as Doing.`)
+  expect(added.notice).toBe('Claude added “Draft the changelog” to Phase 1.')
+
+  expect(run('add_task', { stage: 'Phase 1', text: 'x', after: 'tnope' }).answer).toBe(
+    'No card tnope in “Phase 1 — Groundwork”. Call list_tasks for the current ids.',
+  )
+  expect(run('add_task', { stage: 'Phase 1' })).toMatchObject({ isError: true })
+  expect(run('add_task', { stage: 'Phase 1', text: 'x', status: 'blocked' }).answer).toBe(
+    'status is todo, doing or done.',
+  )
+})
+
+test('set_task_status moves one card, says when nothing changed, and refuses a stale id', async () => {
+  const moved = run('set_task_status', { id: VERIFY.id, status: 'done' })
+  expect(moved.answer).toBe(`Moved ${VERIFY.id} “Check the API notes against v2” from To do to Done.`)
+  expect(moved.text).toBe(SAMPLE.replace('- [ ] **Check', '- [x] **Check'))
+
+  const same = run('set_task_status', { id: VERIFY.id, status: 'todo' })
+  expect(same.text).toBeUndefined()
+  expect(same.answer).toMatch(/is already To do; nothing changed\.$/)
+
+  const stale = run('set_task_status', { id: VERIFY.id, status: 'done' }, SAMPLE.replace('still describe', 'describe'))
+  expect(stale).toMatchObject({ isError: true })
+  expect(stale.answer).toMatch(/^No card t\S+ in TASKS\.md: it was removed, or its text changed since it was listed\./)
+})
+
+test('remove_task deletes a card with its folded lines, and says when a stage is left empty', async () => {
+  const removed = run('remove_task', { id: VERIFY.id })
+  expect(removed.text).toBe(
+    SAMPLE.replace(
+      '- [ ] **Check the API notes against v2.** They still describe\n      the v1 endpoints.\n',
+      '',
+    ),
+  )
+  expect(removed.answer).toBe(
+    `Removed ${VERIFY.id} “Check the API notes against v2” from “Phase 1 — Groundwork” (it was at line 11).`,
+  )
+
+  const last = parseRoadmap(SAMPLE, '', 0).stages[1]!.tasks[0]!
+  const emptied = run('remove_task', { id: last.id })
+  expect(emptied.answer).toMatch(/It was the last card in “Phase 2 — First release”, so that is no longer a stage;/)
+  expect(parseRoadmap(emptied.text!, '', 0).stages.map(stage => stage.title)).toEqual(['Phase 1 — Groundwork'])
+  // The card that ends a file with no final newline leaves it with none.
+  expect(removeTask('## S\n- [ ] a\n- [ ] b', ids('## S\n- [ ] a\n- [ ] b')[0]![1]!)).toMatchObject({ text: '## S\n- [ ] a' })
+})
+
+test('add_stage adds a section with its first cards, at the end or after a stage', async () => {
+  const atEnd = run('add_stage', { title: 'Phase 3 — Launch', tasks: ['Write the  announcement', 'Ship it'] })
+  expect(atEnd.text).toBe(`${SAMPLE}\n## Phase 3 — Launch\n\n- [ ] Write the announcement\n- [ ] Ship it\n`)
+  expect(atEnd.answer).toMatch(/^Added stage “Phase 3 — Launch” with 2 cards: t\S+ “Write the announcement”, t\S+ “Ship it”\.$/)
+
+  const after = run('add_stage', { title: 'Phase 1.5 — Polish', tasks: ['Tidy the UI'], after: 'Phase 1' })
+  expect(after.text!.split('\n').slice(14, 22)).toEqual([
+    '**Exit test:** something.',
+    '',
+    '## Phase 1.5 — Polish',
+    '',
+    '- [ ] Tidy the UI',
+    '',
+    '## Phase 2 — First release',
+    '',
+  ])
+  expect(parseRoadmap(after.text!, '', 0).stages.map(stage => stage.title)).toEqual([
+    'Phase 1 — Groundwork',
+    'Phase 1.5 — Polish',
+    'Phase 2 — First release',
+  ])
+
+  expect(run('add_stage', { title: 'Phase 1 — Groundwork', tasks: ['x'] }).answer).toBe(
+    'A stage titled “Phase 1 — Groundwork” already exists; add cards to it instead.',
+  )
+  expect(run('add_stage', { title: 'Empty', tasks: [] }).answer).toBe(
+    'A stage needs at least one card: give its first task.',
+  )
+  // Into an empty file, and onto a last line with no newline.
+  expect(addStage('', 'S', ['a'], null)).toMatchObject({ text: '## S\n\n- [ ] a' })
+  expect(addStage('# Plan', 'S', ['a'], null)).toMatchObject({ text: '# Plan\n\n## S\n\n- [ ] a' })
+})
+
+test('remove_stage refuses while cards are unfinished, and with force deletes the whole section', async () => {
+  const refused = run('remove_stage', { title: 'Phase 1' })
+  expect(refused).toMatchObject({ isError: true })
+  expect(refused.text).toBeUndefined()
+  expect(refused.answer).toBe(
+    `“Phase 1 — Groundwork” still has 2 unfinished cards: ${VERIFY.id} “Check the API notes against v2” (To do); ` +
+      `${ids(SAMPLE)[0]![2]} “Choose the app name” (Doing). Finish them, or call remove_stage again with force: true ` +
+      'to delete them with the stage.',
+  )
+
+  const forced = run('remove_stage', { title: 'Phase 1', force: true })
+  expect(forced.answer).toBe('Removed stage “Phase 1 — Groundwork”: its heading, notes and 3 cards (1 done).')
+  expect(forced.text!.split('\n').slice(0, 4)).toEqual(['# Plan', '', '## Phase 2 — First release', ''])
+
+  // A finished stage at the end of the file goes with the blank lines above
+  // it, and the file keeps whether it ended with a newline.
+  expect(removeStage('A\n\n## S\n- [x] done\n', 'S')).toMatchObject({ text: 'A\n' })
+  expect(removeStage('A\n\n## S\n- [x] done', 'S')).toMatchObject({ text: 'A' })
+  expect(run('remove_stage', { title: 'S' }, 'A\n\n## S\n- [x] done\n')).toMatchObject({ text: 'A\n' })
+  expect(removeStage('- [x] loose\n', 'Tasks')).toMatchObject({
+    error: '“Tasks” is the cards above the file\'s first ## heading, not a section: remove them one by one.',
+  })
+})
+
+test('the tools are registered only where the task file exists', async ($, on) => {
+  const { tools } = await world($, on)
+  expect(tools).toEqual(['list_tasks', 'add_task', 'set_task_status', 'remove_task', 'add_stage', 'remove_stage'])
+})
+
+test('no task file, no tools', async ($, on) => {
+  const tools: string[] = []
+  mock.clock(on)
+  on('command.register', () => ({ value: { command: 'kanban' } }))
+  on('tool.register', (_, e) => {
+    tools.push(e.name)
+
+    return { value: { tool: `mcp__roadmap-kanban__${e.name}` } }
+  })
+  on('session.start', (_, e) => ({ cwd: e.cwd }))
+  on('fs.stat', () => {
+    throw new Error('ENOENT')
+  })
+  await $.session.start({ cwd: '/elsewhere', surface: 'terminal', isInteractive: false })
+  expect(tools).toEqual([])
+})
+
+test('a tool call writes the file and shows on the board at once; a refused one writes nothing', async ($, on) => {
+  const { file } = await world($, on)
+  const ui = await pane($)
+  expect((await ui.find({ type: 'Text', text: /^DONE/ }))?.text).toBe('DONE · 1')
+
+  const moved = await $.tool.call({ tool: 'mcp__roadmap-kanban__set_task_status', id: VERIFY.id, status: 'done' })
+  expect(moved).toMatchObject({ result: `Moved ${VERIFY.id} “Check the API notes against v2” from To do to Done.` })
+  expect(file.text).toBe(SAMPLE.replace('- [ ] **Check', '- [x] **Check'))
+  expect((await ui.find({ type: 'Text', text: /^DONE/ }))?.text).toBe('DONE · 2')
+  expect(await ui.find({ type: 'Text', text: 'Claude moved “Check the API notes against v2” to Done.' })).toBeDefined()
+
+  const refused = await $.tool.call({ tool: 'mcp__roadmap-kanban__remove_stage', title: 'Phase 2' })
+  expect(JSON.stringify(refused)).toContain('still has 1 unfinished card')
+  expect(file.writes).toHaveLength(1)
   await ui.unmount()
 })

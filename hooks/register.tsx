@@ -5,12 +5,18 @@
 // To do (`- [ ]`), Doing (`- [/]`) or Done (`- [x]`). Moving a card rewrites
 // that one checkbox; adding one inserts a `- [ ]` line below the selected card.
 // The file is the only store: edits made anywhere else show within POLL_MS.
+//
+// Where the file exists, the mod also registers tools the model calls to
+// list, add, move and remove cards and stages (tools.ts); they answer after
+// the session's own permission check, and their edits show on the board at once.
 
 import { atom, read, update } from 'claude-code'
-import type { EngineInterface, Register } from 'claude-code'
+import type { EngineInterface, Register, ToolCallResult } from 'claude-code'
 
 import type { Board, Stage, Status, Task } from '../types'
 import { addTask, LABELS, parseRoadmap, setStatus } from './roadmap'
+import { runTool, toolSpecs } from './tools'
+import type { ToolName } from './tools'
 
 const PANE = 'roadmap-kanban'
 const DEFAULT_FILE = 'TASKS.md'
@@ -142,6 +148,43 @@ async function add(
   }
 }
 
+/** Lists the tools for the model; registering again replaces, so a repeat is harmless. */
+async function offerTools($: EngineInterface): Promise<void> {
+  try {
+    for (const spec of toolSpecs(fileName)) await $.tool.register(spec)
+  } catch {
+    // The board works without them; a refused registration only loses the tools.
+  }
+}
+
+/** A tool's answer when its hook threw or overran. */
+function failed(name: ToolName): ToolCallResult {
+  return {
+    deny: `The ${name} tool failed before answering; call list_tasks to see ${fileName} as it is.`,
+  }
+}
+
+/** Answers one tool call over the file as it is on disk now. */
+async function serve($: EngineInterface, name: ToolName, call: object): Promise<ToolCallResult> {
+  const input = call as Record<string, unknown>
+  const path = pathIn(await $.session.cwd())
+  const text = await $.fs.read(path).catch(() => undefined)
+  if (text === undefined) return { deny: `No ${fileName} at ${path}.` }
+  const out = runTool(name, input, text, fileName)
+  if (out.isError) return { deny: out.answer }
+  if (out.text !== undefined && out.text !== text) {
+    try {
+      await $.fs.write(path, out.text)
+    } catch (err) {
+      return { deny: `Could not write ${fileName}: ${messageOf(err)}` }
+    }
+    await load($, path, true).catch(() => undefined)
+    if (out.notice !== undefined) await say($, out.notice, false)
+  }
+
+  return { result: out.answer }
+}
+
 async function reload($: EngineInterface): Promise<void> {
   const path = pathIn(await $.session.cwd())
   await load($, path, true)
@@ -161,21 +204,48 @@ export const register: Register = (on, options) => {
       name: 'kanban',
       description: `Open the kanban board for ${fileName}`,
     })
+    const path = pathIn(e.cwd)
+    await load($, path, true).catch(() => undefined)
+    const isFound = (await read($, board)).error === null
+    // The tools appear only where there is a task file to work on.
+    if (isFound) await offerTools($)
     if (e.isInteractive) {
-      const path = pathIn(e.cwd)
-      await load($, path, true).catch(() => undefined)
       poll?.cancel()
       poll = $.clock.every(POLL_MS, () => {
         void load($, path, false).catch(() => undefined)
       })
-      if ((await read($, board)).error === null) void $.ui.open({ id: PANE, title: titleOf() })
+      if (isFound) void $.ui.open({ id: PANE, title: titleOf() })
     }
 
     return next(e)
   })
 
+  // One hook per tool, each matched by its exact name (a wildcard doesn't hear
+  // tool.run) and written out as a function, as the loader requires. The
+  // model's arguments arrive beside `tool` on `e`.
+  on('tool.run', { tool: 'mcp__roadmap-kanban__list_tasks' }, ($, e) =>
+    serve($, 'list_tasks', e),
+  ).catch(() => failed('list_tasks'))
+  on('tool.run', { tool: 'mcp__roadmap-kanban__add_task' }, ($, e) =>
+    serve($, 'add_task', e),
+  ).catch(() => failed('add_task'))
+  on('tool.run', { tool: 'mcp__roadmap-kanban__set_task_status' }, ($, e) =>
+    serve($, 'set_task_status', e),
+  ).catch(() => failed('set_task_status'))
+  on('tool.run', { tool: 'mcp__roadmap-kanban__remove_task' }, ($, e) =>
+    serve($, 'remove_task', e),
+  ).catch(() => failed('remove_task'))
+  on('tool.run', { tool: 'mcp__roadmap-kanban__add_stage' }, ($, e) =>
+    serve($, 'add_stage', e),
+  ).catch(() => failed('add_stage'))
+  on('tool.run', { tool: 'mcp__roadmap-kanban__remove_stage' }, ($, e) =>
+    serve($, 'remove_stage', e),
+  ).catch(() => failed('remove_stage'))
+
   on('command.run', { command: 'kanban' }, async $ => {
     await load($, pathIn(await $.session.cwd()), true).catch(() => undefined)
+    // A task file made since the session started gets its tools now.
+    if ((await read($, board)).error === null) await offerTools($)
     const opened = await $.ui.open({ id: PANE, title: titleOf(), focus: true })
 
     return {

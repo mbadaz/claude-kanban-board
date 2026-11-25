@@ -86,19 +86,34 @@ function joinLines(lines: string[], ends: string[]): string {
 
 type Located = Task & { stage: string; first: number; last: number; indent: string }
 
+/** A `## ` section's lines: its heading at `start`, up to (not including) `end`. */
+type Section = { title: string; start: number; end: number }
+
 /**
  * Every task in file order, with where it sits; stages with no tasks are
  * absent. A title seen before reopens that stage, so titles stay unique: the
- * board finds a stage, and `addTask` its place, by title alone.
+ * board finds a stage, and `addTask` its place, by title alone. `sections` is
+ * every `## ` section, with or without tasks; one ends at the next `## ` or
+ * `# ` heading.
  */
-function locate(text: string): { stages: { title: string; tasks: Located[] }[] } {
+function locate(text: string): {
+  stages: { title: string; tasks: Located[] }[]
+  sections: Section[]
+} {
   const { lines } = splitLines(text)
   const stages: { title: string; tasks: Located[] }[] = []
+  const sections: Section[] = []
   const seen = new Map<string, number>()
   let stage: { title: string; tasks: Located[] } | null = null
+  let section: Section | null = null
   let group: string | null = null
   let inFence = false
   let open: { first: number; indent: number; mark: string; body: string[] } | null = null
+
+  const endSection = (at: number) => {
+    if (section !== null) section.end = at
+    section = null
+  }
 
   const stageNamed = (title: string) => {
     const known = stages.find(one => one.title === title)
@@ -153,11 +168,16 @@ function locate(text: string): { stages: { title: string; tasks: Located[] }[] }
     close(i - 1)
     const heading = STAGE.exec(line)
     if (heading) {
-      stage = stageNamed(clean(heading[1]!))
+      endSection(i)
+      const title = clean(heading[1]!)
+      section = { title, start: i, end: lines.length }
+      sections.push(section)
+      stage = stageNamed(title)
       group = null
       continue
     }
     if (TITLE.test(line)) {
+      endSection(i)
       stage = null
       group = null
       continue
@@ -171,7 +191,7 @@ function locate(text: string): { stages: { title: string; tasks: Located[] }[] }
   }
   close(lines.length - 1)
 
-  return { stages: stages.filter(one => one.tasks.length > 0) }
+  return { stages: stages.filter(one => one.tasks.length > 0), sections }
 }
 
 function strip(task: Located): Task {
@@ -191,7 +211,16 @@ export function parseRoadmap(text: string, path: string, mtimeMs: number): Board
 
 export type Edit = { text: string; task: Task } | { error: string }
 
-const GONE = 'That card is no longer in the file as shown; the board was reloaded.'
+/** The answer when a card id no longer matches: the card went, or its text changed. */
+export const GONE = 'That card is no longer in the file as shown; the board was reloaded.'
+
+function noStage(title: string): string {
+  return `No stage titled “${title}”.`
+}
+
+function collapse(text: string): string {
+  return text.replace(/\s+/g, ' ').trim()
+}
 
 /** Rewrites one task's checkbox; finds the task again by id in `text` as it is now. */
 export function setStatus(text: string, id: string, status: Status): Edit {
@@ -206,20 +235,21 @@ export function setStatus(text: string, id: string, status: Status): Edit {
 }
 
 /**
- * Inserts `- [ ] body` right below the card `afterId` names, or below the
- * stage's last card, at that card's indent and with that line's ending.
- * Answers the new card's id.
+ * Inserts `- [ ] body` (or the mark `status` names) right below the card
+ * `afterId` names, or below the stage's last card, at that card's indent and
+ * with that line's ending. Answers the new card's id.
  */
 export function addTask(
   text: string,
   stageTitle: string,
   afterId: string | null,
   body: string,
+  status: Status = 'todo',
 ): { text: string; id: string } | { error: string } {
-  const words = body.replace(/\s+/g, ' ').trim()
+  const words = collapse(body)
   if (words === '') return { error: 'Type the task first.' }
   const stage = locate(text).stages.find(one => one.title === stageTitle)
-  if (stage === undefined) return { error: GONE }
+  if (stage === undefined) return { error: noStage(stageTitle) }
   const anchor =
     stage.tasks.find(one => one.id === afterId) ?? stage.tasks[stage.tasks.length - 1]!
   const { lines, ends } = splitLines(text)
@@ -228,7 +258,7 @@ export function addTask(
   // The anchor ends the file with no final newline: it gains the line above's
   // ending, and the new last line keeps the file's lack of one.
   ends[at] = end || ends[at - 1] || '\n'
-  lines.splice(at + 1, 0, `${anchor.indent}- [ ] ${words}`)
+  lines.splice(at + 1, 0, `${anchor.indent}- [${MARKS[status]}] ${words}`)
   ends.splice(at + 1, 0, end)
   const next = joinLines(lines, ends)
   const added = locate(next)
@@ -236,4 +266,109 @@ export function addTask(
     ?.tasks.find(one => one.first === anchor.last + 1)
 
   return { text: next, id: added?.id ?? '' }
+}
+
+/** Deletes one card: its checkbox line and every line folded into it. */
+export function removeTask(text: string, id: string): Edit {
+  const task = locate(text)
+    .stages.flatMap(one => one.tasks)
+    .find(one => one.id === id)
+  if (task === undefined) return { error: GONE }
+  const { lines, ends } = splitLines(text)
+  const count = task.last - task.first + 1
+  const lastEnd = ends[task.last]!
+  lines.splice(task.first, count)
+  ends.splice(task.first, count)
+  // The card ended the file with no final newline: the new last line keeps that.
+  if (lastEnd === '' && task.first > 0 && task.first === lines.length) ends[task.first - 1] = ''
+
+  return { text: joinLines(lines, ends), task: strip(task) }
+}
+
+/**
+ * Adds a `## title` section holding one to-do card per body: at the end of the
+ * file, or right after the last section titled `afterTitle`. Refuses a title a
+ * stage already has, since sections that share a title are one stage.
+ */
+export function addStage(
+  text: string,
+  title: string,
+  bodies: readonly string[],
+  afterTitle: string | null,
+): { text: string; title: string; ids: string[] } | { error: string } {
+  const name = collapse(title)
+  if (name === '') return { error: 'Give the stage a title.' }
+  const words = bodies.map(collapse).filter(body => body !== '')
+  if (words.length === 0) return { error: 'A stage needs at least one card: give its first task.' }
+  const found = locate(text)
+  const parsed = clean(name)
+  if (found.stages.some(one => one.title === parsed)) {
+    return { error: `A stage titled “${parsed}” already exists; add cards to it instead.` }
+  }
+  const { lines, ends } = splitLines(text)
+  const eol = ends.find(end => end !== '') ?? '\n'
+  if (text === '') {
+    lines.length = 0
+    ends.length = 0
+  }
+  let at = lines.length
+  if (afterTitle !== null) {
+    const after = found.sections.filter(one => one.title === afterTitle)
+    if (after.length === 0) return { error: noStage(afterTitle) }
+    at = after[after.length - 1]!.end
+  }
+  // The file's final newline (an empty last element) stays at the very end.
+  if (at === lines.length && lines.length > 1 && lines[at - 1] === '') at -= 1
+  const isLast = at === lines.length || (at === lines.length - 1 && lines[at] === '')
+  const block: string[] = []
+  if (at > 0 && lines[at - 1]!.trim() !== '') block.push('')
+  block.push(`## ${name}`, '', ...words.map(word => `- [ ] ${word}`))
+  if (!isLast) block.push('')
+  if (at === lines.length) {
+    // Appending past a last line with no newline: it gains one, and the new
+    // last line keeps the file's lack of one.
+    if (at > 0) ends[at - 1] = eol
+    lines.push(...block)
+    ends.push(...block.map(() => eol))
+    ends[ends.length - 1] = ''
+  } else {
+    lines.splice(at, 0, ...block)
+    ends.splice(at, 0, ...block.map(() => eol))
+  }
+  const next = joinLines(lines, ends)
+  const made = locate(next).stages.find(one => one.title === parsed)
+
+  return { text: next, title: parsed, ids: made?.tasks.map(task => task.id) ?? [] }
+}
+
+/**
+ * Deletes every section titled `title`: heading, notes and cards. A section
+ * that ran to the end of the file takes the blank lines above it too, and the
+ * file keeps whether it ended with a newline.
+ */
+export function removeStage(
+  text: string,
+  title: string,
+): { text: string; tasks: Task[] } | { error: string } {
+  const found = locate(text)
+  const stage = found.stages.find(one => one.title === title)
+  if (stage === undefined) return { error: noStage(title) }
+  const ranges = found.sections.filter(one => one.title === title)
+  if (ranges.length === 0) {
+    return {
+      error: `“${title}” is the cards above the file's first ## heading, not a section: remove them one by one.`,
+    }
+  }
+  const { lines, ends } = splitLines(text)
+  const hadFinalNewline = lines[lines.length - 1] === ''
+  for (const range of [...ranges].reverse()) {
+    const reachesEnd = range.end >= lines.length
+    let start = range.start
+    if (reachesEnd) while (start > 0 && lines[start - 1]!.trim() === '') start -= 1
+    lines.splice(start, range.end - start)
+    ends.splice(start, range.end - start)
+    if (reachesEnd && !hadFinalNewline && lines.length > 0) ends[lines.length - 1] = ''
+  }
+
+  return { text: joinLines(lines, ends), tasks: stage.tasks.map(strip) }
 }
