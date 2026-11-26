@@ -5,6 +5,8 @@ plain markdown task file in your project (`TASKS.md` by default). The file is
 the only store: moving or adding a card rewrites the file, and edits you make
 to it anywhere else show on the board within a second or two.
 
+![The board in a Claude Code pane: stage tabs, a progress bar, To do / Doing / Done columns with grouped cards, and the selected card's details](docs/board.png)
+
 ## Install
 
 At the prompt of a Claude Code terminal session:

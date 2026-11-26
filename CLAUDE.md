@@ -18,6 +18,7 @@ file covers working on the mod.
 | `types/index.d.ts` | The `$.state` contract (`PluginState['roadmap-kanban']`) and the tools' inputs (`McpToolInputs`) |
 | `tests/kanban.test.tsx` | Parser, editor and pane tests |
 | `tsconfig.json` | Extends `.claude-plugin/types/tsconfig.json`, which the engine writes |
+| `docs/board.png` | The README's screenshot: the real pane, drawn over a generic demo task file and cropped to the pane. Retake it when the board's look changes, keeping the content generic |
 
 ## Rules, and why
 
